@@ -1,50 +1,93 @@
+import streamlit as st
 import pandas as pd
-import numpy as np
+from PIL import Image
 import nltk
 from nltk.stem.snowball import SnowballStemmer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import streamlit as st
-from PIL import Image
 
-# Load the dataset
-data = pd.read_csv('amazon_product.csv')
+@st.cache_data
+def load_data():
+    df = pd.read_csv("amazon_product.csv") 
+    df["Title"] = df["Title"].fillna("")
+    df["Description"] = df["Description"].fillna("")
+    df["Text"] = df["Title"] + " " + df["Description"]
+    return df
 
-# Remove unnecessary columns
-data = data.drop('id', axis=1)
+amazon_df = load_data()
 
-# Define tokenizer and stemmer
-stemmer = SnowballStemmer('english')
-def tokenize_and_stem(text):
+# NLP preprocessing
+stemmer = SnowballStemmer("english")
+nltk.download('punkt', quiet=True)
+
+def tokenize_stem(text):
     tokens = nltk.word_tokenize(text.lower())
     stems = [stemmer.stem(t) for t in tokens]
     return stems
 
-# Create stemmed tokens column
-data['stemmed_tokens'] = data.apply(lambda row: tokenize_and_stem(row['Title'] + ' ' + row['Description']), axis=1)
+@st.cache_resource
+def build_tfidf(df):
+    vectorizer = TfidfVectorizer(tokenizer=tokenize_stem, stop_words="english", max_features=5000)
+    tfidf_matrix = vectorizer.fit_transform(df["Text"])
+    return vectorizer, tfidf_matrix
 
-# Define TF-IDF vectorizer and cosine similarity function
-tfidf_vectorizer = TfidfVectorizer(tokenizer=tokenize_and_stem)
-def cosine_sim(text1, text2):
-    # tfidf_matrix = tfidf_vectorizer.fit_transform([text1, text2])
-    text1_concatenated = ' '.join(text1)
-    text2_concatenated = ' '.join(text2)
-    tfidf_matrix = tfidf_vectorizer.fit_transform([text1_concatenated, text2_concatenated])
-    return cosine_similarity(tfidf_matrix)[0][1]
+vectorizer, tfidf_matrix = build_tfidf(amazon_df)
 
-# Define search function
-def search_products(query):
-    query_stemmed = tokenize_and_stem(query)
-    data['similarity'] = data['stemmed_tokens'].apply(lambda x: cosine_sim(query_stemmed, x))
-    results = data.sort_values(by=['similarity'], ascending=False).head(10)[['Title', 'Description', 'Category']]
+# Search function
+def search_products(query, top_n=5):
+    if not query.strip():
+        return pd.DataFrame()
+    query_vec = vectorizer.transform([query])
+    cosine_sim = cosine_similarity(query_vec, tfidf_matrix).flatten()
+    top_indices = cosine_sim.argsort()[-top_n:][::-1]
+    results = amazon_df.iloc[top_indices][["Title", "Description","Category"]].copy()
+    results["Similarity"] = cosine_sim[top_indices]
     return results
 
-# web app
-img = Image.open('img.webp')
-st.image(img,width=600)
-st.title("Search Engine and Product Recommendation System ON Am Data")
-query = st.text_input("Enter Product Name")
-sumbit = st.button('Search')
-if sumbit:
-    res = search_products(query)
-    st.write(res)
+# Recommendation function
+def recommend_products(selected_index, top_n=5):
+    cosine_sim_matrix = cosine_similarity(tfidf_matrix[selected_index], tfidf_matrix).flatten()
+    indices = cosine_sim_matrix.argsort()[-top_n-1:][::-1]
+    indices = [i for i in indices if i != selected_index][:top_n]
+    recommended = amazon_df.iloc[indices][["Title", "Description","Category"]].copy()
+    recommended["Similarity"] = cosine_sim_matrix[indices]
+    return recommended
+
+
+# App UI
+
+img = Image.open("img.webp") 
+st.image(img, width=600)
+st.title("🛍️ Amazon Product Search & Recommendations")
+st.markdown("""
+Search for a product and get **top matches** along with **recommended similar products**.
+""")
+
+query = st.text_input("🔎 Enter a product name or description:")
+submit = st.button("Search")
+
+if submit:
+    if not query.strip():
+        st.warning("Please enter a product name or description.")
+    else:
+        results = search_products(query, top_n=10)
+        if results.empty:
+            st.error("No matching products found 😕")
+        else:
+            st.success(f"Top {len(results)} products for '{query}':")
+            for i, row in results.iterrows():
+                st.markdown(f"### {row['Title']}")
+                st.write(f"**Category:** {row.get('Category','N/A')}")
+                st.write(f"**Description:** {row.get('Description','')[:300]}...")
+                st.progress(min(1.0, row['Similarity']))
+                st.write("---")
+            # Recommended Section
+            st.subheader("💡 Recommended Products based on top match")
+            top_product_index = results.index[0]  
+            recommended = recommend_products(top_product_index, top_n=5)
+            for i, row in recommended.iterrows():
+                st.markdown(f"### {row['Title']}")
+                st.write(f"**Category:** {row.get('Category','N/A')}")
+                st.write(f"**Description:** {row.get('Description','')[:300]}...")
+                st.progress(min(1.0, row['Similarity']))
+                st.write("---")
